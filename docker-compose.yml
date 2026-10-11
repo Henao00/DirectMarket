@@ -1,0 +1,118 @@
+# DirectMarket - Docker Compose para desarrollo local
+#
+# Levanta todos los servicios necesarios con un solo comando:
+#   docker-compose up -d
+#
+# RNF-03: PostgreSQL configurado para soporte de carga concurrente
+# RNF-04: Healthchecks en todos los servicios
+
+version: '3.9'
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Base de datos PostgreSQL
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: directmarket_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       directmarket_db
+      POSTGRES_USER:     directmarket_user
+      POSTGRES_PASSWORD: directmarket_dev_pass
+    ports:
+      - '5432:5432'
+    volumes:
+      # Datos persistentes entre reinicios
+      - postgres_data:/var/lib/postgresql/data
+      # Ejecutar la migracion inicial al crear el contenedor por primera vez
+      - ./backend/src/migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U directmarket_user -d directmarket_db']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # RNF-03: configuracion de PostgreSQL para carga concurrente
+    command: >
+      postgres
+        -c max_connections=200
+        -c shared_buffers=256MB
+        -c effective_cache_size=768MB
+        -c work_mem=4MB
+
+  # ---------------------------------------------------------------------------
+  # Backend API Express
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: directmarket_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV:                      development
+      PORT:                          4000
+      DB_HOST:                       postgres
+      DB_PORT:                       5432
+      DB_NAME:                       directmarket_db
+      DB_USER:                       directmarket_user
+      DB_PASSWORD:                   directmarket_dev_pass
+      JWT_SECRET:                    dev-jwt-secret-change-in-production-must-be-64-chars-minimum
+      JWT_EXPIRES_IN:                7d
+      RELEASE_CODE_EXPIRY_HOURS:     24
+      RELEASE_CODE_MAX_ATTEMPTS:     3
+      LOGIN_MAX_ATTEMPTS:            5
+      LOGIN_BLOCK_MINUTES:           15
+      FRONTEND_URL:                  http://localhost:3000
+      SMTP_HOST:                     mailhog
+      SMTP_PORT:                     1025
+      SMTP_USER:                     noreply@directmarket.com
+      SMTP_PASS:                     ''
+    ports:
+      - '4000:4000'
+    volumes:
+      # Hot reload en desarrollo (montar src sin node_modules)
+      - ./backend/src:/app/src:ro
+    healthcheck:
+      test: ['CMD', 'node', '-e', "require('http').get('http://localhost:4000/health', r => process.exit(r.statusCode === 200 ? 0 : 1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Frontend React (solo en desarrollo)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: directmarket_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_URL: http://localhost:4000/api
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./frontend/src:/app/src:ro
+
+  # ---------------------------------------------------------------------------
+  # MailHog: captura de emails en desarrollo (sin envio real)
+  # Interfaz web en http://localhost:8025
+  # ---------------------------------------------------------------------------
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: directmarket_mailhog
+    restart: unless-stopped
+    ports:
+      - '1025:1025'   # SMTP
+      - '8025:8025'   # Interfaz web
+
+volumes:
+  postgres_data:
+    driver: local
